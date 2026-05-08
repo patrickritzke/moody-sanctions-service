@@ -202,7 +202,8 @@ async def list_tools() -> list[types.Tool]:
                 "Search the Moody's RDC compliance database by name or alias. "
                 "Returns matching persons and organizations with their compliance "
                 "list memberships (sanctions, PEP status, adverse media, etc.). "
-                "Use this to screen a party name."
+                "Optionally filter to only entities that appear on specific source lists "
+                "by passing source_ids. Use get_overview first to see available source IDs."
             ),
             inputSchema={
                 "type": "object",
@@ -210,6 +211,11 @@ async def list_tools() -> list[types.Tool]:
                     "name": {
                         "type": "string",
                         "description": "Name to search for (partial match, case-insensitive)"
+                    },
+                    "source_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of source IDs to filter by. Only entities linked to at least one of these sources will be returned."
                     },
                     "limit": {
                         "type": "integer",
@@ -272,33 +278,54 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
 async def _search_entities(con, args: dict) -> list[types.TextContent]:
     query = args["name"].strip()
     limit = int(args.get("limit", 20))
+    source_ids: list[str] = args.get("source_ids") or []
     pattern = f"%{query}%"
+
+    # Build optional source filter: entity must have at least one matching source_item_id
+    if source_ids:
+        placeholders = ", ".join("?" * len(source_ids))
+        source_filter = f"""
+            AND EXISTS (
+                SELECT 1 FROM (
+                    SELECT UNNEST(json_extract_string(source_item_ids, '$[*]')) AS sid
+                )
+                WHERE sid IN ({placeholders})
+            )
+        """
+        params_search = [pattern, pattern] + source_ids + [limit]
+        params_count  = [pattern, pattern] + source_ids
+    else:
+        source_filter = ""
+        params_search = [pattern, pattern, limit]
+        params_count  = [pattern, pattern]
 
     rows = con.execute(f"""
         SELECT entity_id, entity_type, entity_name, dob_year, gender,
                nationalities, countries, event_categories, event_sub_categories,
                alias_names
         FROM {TABLE}
-        WHERE entity_name ILIKE ?
-           OR alias_names ILIKE ?
+        WHERE (entity_name ILIKE ? OR alias_names ILIKE ?)
+        {source_filter}
         ORDER BY entity_name
         LIMIT ?
-    """, [pattern, pattern, limit]).fetchall()
+    """, params_search).fetchall()
 
     cols = [d[0] for d in con.description]
 
     if not rows:
-        return [types.TextContent(
-            type="text",
-            text=f'No entities found matching "{query}" in the RDC database.'
-        )]
+        msg = f'No entities found matching "{query}" in the RDC database.'
+        if source_ids:
+            msg += f' (filtered to sources: {", ".join(source_ids)})'
+        return [types.TextContent(type="text", text=msg)]
 
     total = con.execute(f"""
         SELECT COUNT(*) FROM {TABLE}
-        WHERE entity_name ILIKE ? OR alias_names ILIKE ?
-    """, [pattern, pattern]).fetchone()[0]
+        WHERE (entity_name ILIKE ? OR alias_names ILIKE ?)
+        {source_filter}
+    """, params_count).fetchone()[0]
 
-    lines = [f'Found {total} match{"es" if total != 1 else ""} for "{query}"'
+    filter_note = f" — filtered to sources: {', '.join(source_ids)}" if source_ids else ""
+    lines = [f'Found {total} match{"es" if total != 1 else ""} for "{query}"{filter_note}'
              + (f" (showing {limit})" if total > limit else "") + ":\n"]
 
     for i, row in enumerate(rows, 1):
