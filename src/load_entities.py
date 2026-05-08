@@ -333,10 +333,12 @@ def stream_entities(xml_path: Path):
 # Loader
 # ---------------------------------------------------------------------------
 
-def load(xml_path: Path, db_path: Path) -> int:
+def load(xml_path: Path, db_path: Path, limit: int | None = None) -> int:
     print(f"Source : {xml_path}")
     print(f"DB     : {db_path}")
     print(f"Table  : {TABLE}")
+    if limit:
+        print(f"Limit  : {limit:,} entities (dev mode)")
 
     con = duckdb.connect(str(db_path))
     con.execute(CREATE_TABLE_SQL)
@@ -358,6 +360,9 @@ def load(xml_path: Path, db_path: Path) -> int:
         if total % LOG_EVERY == 0:
             print(f"  {total:,} entities loaded…")
 
+        if limit and total >= limit:
+            break
+
     if batch:
         con.executemany(INSERT_SQL, batch)
 
@@ -367,14 +372,23 @@ def load(xml_path: Path, db_path: Path) -> int:
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Stop after N entities (dev mode)")
+    parser.add_argument("--db", default=None,
+                        help="Override output DB path")
+    args = parser.parse_args()
+
     if not XML_PATH.exists():
         print(f"ERROR: {XML_PATH} not found. Run check_setup.py first.")
         sys.exit(1)
 
-    total = load(XML_PATH, DB_PATH)
-    print(f"\nDone — {total:,} entities written to {DB_PATH}")
+    db_path = Path(args.db) if args.db else DB_PATH
+    total = load(XML_PATH, db_path, limit=args.limit)
+    print(f"\nDone — {total:,} entities written to {db_path}")
 
-    con = duckdb.connect(str(DB_PATH), read_only=True)
+    con = duckdb.connect(str(db_path), read_only=True)
     count = con.execute(f"SELECT COUNT(*) FROM {TABLE}").fetchone()[0]
     print(f"\nSELECT COUNT(*) FROM {TABLE}  →  {count:,}")
     types = con.execute(f"""
