@@ -343,8 +343,8 @@ async def _get_overview(con) -> list[types.TextContent]:
     top_countries = con.execute(f"""
         SELECT cty, COUNT(*) n
         FROM (
-            SELECT UNNEST(json_extract_string(countries, '$[*]')) AS cty
-            FROM {TABLE} WHERE countries IS NOT NULL
+            SELECT UNNEST(json_extract_string(address_countries, '$[*]')) AS cty
+            FROM {TABLE} WHERE address_countries IS NOT NULL
         )
         GROUP BY 1 ORDER BY 2 DESC LIMIT 15
     """).fetchall()
