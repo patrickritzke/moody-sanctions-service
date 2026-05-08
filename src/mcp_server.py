@@ -28,12 +28,14 @@ from mcp.server.stdio import stdio_server
 from mcp import types
 import yaml
 
-load_dotenv()
+ROOT = Path(__file__).parent.parent
+load_dotenv(ROOT / ".env")
 
-with open(Path(__file__).parent.parent / "config.yaml") as f:
+with open(ROOT / "config.yaml") as f:
     config = yaml.safe_load(f)
 
-DB_PATH = Path(os.environ.get("OUTPUT_DIR", "data/output")) / config["db_filename"]
+_output_dir = os.environ.get("OUTPUT_DIR")
+DB_PATH = (Path(_output_dir) if _output_dir else ROOT / "data" / "output") / config["db_filename"]
 TABLE   = config["tables"]["entities"]
 
 server = Server("rdc-compliance")
