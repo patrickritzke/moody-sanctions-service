@@ -1,0 +1,21 @@
+# Non-secret pipeline configuration.
+# Secrets and paths live in .env (gitignored).
+
+loader:
+  batch_size: 5000        # rows per DuckDB INSERT
+  log_every: 50000        # print progress every N entities
+
+files:
+  entities:      rdc_entities_1.xml
+  relationships: rdc_relationships_1.xml
+  sources:       rdc_sources_1.xml
+  dictionary:    rdc_dictionary.xml
+  entities_xsd:  rdc_entities.xsd
+
+tables:
+  entities:      entities
+  relationships: relationships
+  sources:       sources
+  dictionary:    dictionary
+
+db_filename: rdc.duckdb
