@@ -28,20 +28,14 @@ from mcp.server.stdio import stdio_server
 from mcp import types
 import yaml
 
-ROOT = Path(__file__).parent.parent
+ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
 with open(ROOT / "config.yaml") as f:
     config = yaml.safe_load(f)
 
-_output_dir = os.environ.get("OUTPUT_DIR")
-if _output_dir:
-    output_path = Path(_output_dir)
-    if not output_path.is_absolute():
-        output_path = ROOT / output_path
-else:
-    output_path = ROOT / "data" / "output"
-DB_PATH = output_path / config["db_filename"]
+# Always resolve DB path relative to the project root — never relative to CWD.
+DB_PATH = ROOT / "data" / "output" / config["db_filename"]
 TABLE   = config["tables"]["entities"]
 
 server = Server("rdc-compliance")
