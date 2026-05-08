@@ -1,40 +1,57 @@
 """
 Streaming XML → DuckDB loader for Moody's RDC entities feed.
 
-Schema is derived from rdc_entities.xsd. Run src/inspect_xml.py first to
-verify element names if your feed version differs from the assumptions below.
+Schema derived from rdc_entities.xsd (verified). Key structure:
 
-Expected XML structure (no namespace):
-  <Entities>
-    <Entity id="…" type="Person|Company|…" active="0|1">
-      <Names>
-        <Name nameType="Primary|Alias|…" language="…">
-          <FullName>…</FullName>
-          <GivenName>…</GivenName>          <!-- persons -->
-          <FamilyName>…</FamilyName>        <!-- persons -->
-        </Name>
-      </Names>
-      <Gender>Male|Female</Gender>
-      <DateOfBirth><Year/><Month/><Day/></DateOfBirth>
-      <DateOfDeath><Year/><Month/><Day/></DateOfDeath>
-      <Deceased>0|1</Deceased>
-      <Nationalities><Nationality>ISO2</Nationality>…</Nationalities>
-      <Countries><Country>ISO2</Country>…</Countries>
-      <Categories><Category categoryId="…">label</Category>…</Categories>
-      <Sources><Source sourceId="…">label</Source>…</Sources>
-      <Identifiers>
-        <Identifier type="…" country="…" number="…"/>
-      </Identifiers>
-      <Addresses>
-        <Address><Street/><City/><Country/><PostalCode/></Address>
-      </Addresses>
-      <Positions><Position>…</Position>…</Positions>
-      <LastUpdated>YYYY-MM-DD</LastUpdated>
-    </Entity>
-  </Entities>
-
-If your XSD uses a namespace, set NAMESPACE below. The loader strips it
-automatically using strip_ns(), so element lookups work either way.
+  <rdc_entities>
+    <entity_updates>
+      <person>
+        <entity_id>…</entity_id>
+        <source_item_id>…</source_item_id>
+        <entity_name>…</entity_name>
+        <systemId>…</systemId>
+        <entityDate>…</entityDate>
+        <aliases>
+          <alias><id/><name/><type/></alias>…
+        </aliases>
+        <date_of_births>
+          <date_of_birth><id/><year/><month/><day/><circa/></date_of_birth>…
+        </date_of_births>
+        <attributes>
+          <attribute><type/><value/></attribute>…   ← gender, nationality, country, …
+        </attributes>
+        <events>
+          <event>
+            <category/><sub_category/><date/><end_date/><description/>
+            <referenceSource>…</referenceSource>
+          </event>…
+        </events>
+        <referenceSources>
+          <referenceSource><source_item_id/></referenceSource>…
+        </referenceSources>
+        <identifications>
+          <identification>
+            <id/><type/><value/><location/><country/><issueDate/><expireDate/>
+          </identification>…
+        </identifications>
+        <positions>
+          <position><name/><fromDate/><toDate/></position>…
+        </positions>
+        <addresses>
+          <address>
+            <id/><raw_format/><address_line1/><address_line2/>
+            <city/><province/><postal_code/><country/><type/>
+          </address>…
+        </addresses>
+      </person>
+      <organization>   ← same structure minus date_of_births and positions
+        …
+      </organization>
+    </entity_updates>
+    <entity_deletions>
+      <entity_id>…</entity_id>…
+    </entity_deletions>
+  </rdc_entities>
 """
 import json
 import os
@@ -62,78 +79,83 @@ TABLE      = config["tables"]["entities"]
 BATCH_SIZE = config["loader"]["batch_size"]
 LOG_EVERY  = config["loader"]["log_every"]
 
-# ---------------------------------------------------------------------------
-# Element name of the repeating record in rdc_entities.xsd.
-# Run inspect_xml.py --xsd to confirm; adjust here if needed.
-# ---------------------------------------------------------------------------
-ENTITY_TAG = "Entity"
+# Both element names are top-level entity types in rdc_entities.xsd
+ENTITY_TAGS = {"person", "organization"}
 
 CREATE_TABLE_SQL = f"""
 CREATE TABLE IF NOT EXISTS {TABLE} (
-    entity_id        VARCHAR PRIMARY KEY,
-    entity_type      VARCHAR,
-    is_active        BOOLEAN,
-    primary_name     VARCHAR,
-    given_name       VARCHAR,
-    family_name      VARCHAR,
-    gender           VARCHAR,
-    dob_year         INTEGER,
-    dob_month        INTEGER,
-    dob_day          INTEGER,
-    dod_year         INTEGER,
-    dod_month        INTEGER,
-    dod_day          INTEGER,
-    deceased         BOOLEAN,
-    nationalities    VARCHAR,
-    countries        VARCHAR,
-    category_ids     VARCHAR,
-    category_names   VARCHAR,
-    source_ids       VARCHAR,
-    source_names     VARCHAR,
-    aliases          VARCHAR,
-    identifier_types VARCHAR,
-    identifier_nums  VARCHAR,
-    positions        VARCHAR,
-    last_updated     VARCHAR
+    entity_id            VARCHAR PRIMARY KEY,
+    entity_type          VARCHAR,        -- 'person' or 'organization'
+    source_item_id       VARCHAR,
+    entity_name          VARCHAR,        -- canonical/primary name
+    system_id            VARCHAR,
+    entity_date          VARCHAR,
+    -- Aliases (aliases/alias[])
+    alias_names          VARCHAR,        -- JSON ["AKA Name 1", ...]
+    alias_types          VARCHAR,        -- JSON ["Also Known As", ...]
+    -- Date of birth (persons only; first entry if multiple)
+    dob_year             INTEGER,
+    dob_month            INTEGER,
+    dob_day              INTEGER,
+    dob_circa            BOOLEAN,
+    -- Pulled from attributes/attribute[] by type value
+    gender               VARCHAR,
+    nationalities        VARCHAR,        -- JSON ["US", "RU"]
+    countries            VARCHAR,        -- JSON ["US"]
+    -- Events = list memberships (events/event[])
+    event_categories     VARCHAR,        -- JSON ["Sanctions", "PEP"]
+    event_sub_categories VARCHAR,        -- JSON ["OFAC SDN", "EU List"]
+    event_dates          VARCHAR,        -- JSON ["2020-01-15", ...]
+    event_end_dates      VARCHAR,        -- JSON ["2023-06-01", ...]
+    event_descriptions   VARCHAR,        -- JSON ["...", ...]
+    -- Reference sources (referenceSources/referenceSource[])
+    source_item_ids      VARCHAR,        -- JSON ["src1", "src2"]
+    -- Identifications (identifications/identification[])
+    id_types             VARCHAR,        -- JSON ["Passport", ...]
+    id_values            VARCHAR,        -- JSON ["ABC123", ...]
+    id_countries         VARCHAR,        -- JSON ["US", ...]
+    -- Positions (persons only, positions/position[])
+    position_names       VARCHAR,        -- JSON ["President", ...]
+    position_from_dates  VARCHAR,        -- JSON ["2018-01-01", ...]
+    position_to_dates    VARCHAR,        -- JSON ["2022-01-01", ...]
+    -- Addresses (addresses/address[])
+    address_countries    VARCHAR,        -- JSON ["US", "RU"]
+    address_cities       VARCHAR         -- JSON ["Washington", ...]
 )
 """
 
 INSERT_SQL = f"""
 INSERT OR REPLACE INTO {TABLE} VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ?,?,?,?,?,?,  ?,?,  ?,?,?,?,  ?,?,?,
+    ?,?,?,?,?,  ?,  ?,?,?,  ?,?,?,  ?,?
 )
 """
 
 
+# ---------------------------------------------------------------------------
+# XML helpers
+# ---------------------------------------------------------------------------
+
 def strip_ns(tag: str) -> str:
-    """Strip XML namespace prefix from a tag name."""
     return tag.split("}", 1)[-1] if "}" in tag else tag
 
 
-def child_text(elem, tag: str) -> str | None:
-    """Return .text of first matching direct child, or None."""
-    child = elem.find(tag)
-    if child is None:
-        # Try without namespace in case elem's children carry one
-        for c in elem:
-            if strip_ns(c.tag) == tag:
-                return (c.text or "").strip() or None
-    return (child.text or "").strip() or None if child is not None else None
-
-
-def iter_children(elem, tag: str):
-    """Yield all direct children whose local name matches tag."""
-    for c in elem:
-        if strip_ns(c.tag) == tag:
-            yield c
-
-
 def find_child(elem, tag: str):
-    """Return first direct child matching local tag, or None."""
     for c in elem:
         if strip_ns(c.tag) == tag:
             return c
     return None
+
+
+def child_text(elem, tag: str) -> str | None:
+    c = find_child(elem, tag)
+    return (c.text or "").strip() or None if c is not None else None
+
+
+def iter_children(elem, tag: str):
+    for c in elem:
+        if strip_ns(c.tag) == tag:
+            yield c
 
 
 def safe_int(val: str | None) -> int | None:
@@ -143,166 +165,173 @@ def safe_int(val: str | None) -> int | None:
         return None
 
 
-def parse_date_block(elem, block_tag: str):
-    """Extract year/month/day integers from a <DateOfBirth> style block."""
-    block = find_child(elem, block_tag)
-    if block is None:
-        return None, None, None
-    return (
-        safe_int(child_text(block, "Year")),
-        safe_int(child_text(block, "Month")),
-        safe_int(child_text(block, "Day")),
-    )
+def jdump(lst: list) -> str | None:
+    return json.dumps(lst) if lst else None
 
 
-def extract_entity(elem) -> tuple:
-    """
-    Map a single <Entity> element to a flat tuple matching INSERT_SQL.
+# ---------------------------------------------------------------------------
+# Entity extraction
+# ---------------------------------------------------------------------------
 
-    Element names are resolved by local name (strip_ns), so the loader
-    works whether or not the feed declares an XML namespace.
-    """
-    entity_id   = elem.get("id") or elem.get("entityId") or elem.get("Id")
-    entity_type = elem.get("type") or elem.get("entityType") or elem.get("Type")
-    active_raw  = elem.get("active") or elem.get("isActive") or "1"
-    is_active   = active_raw not in ("0", "false", "False", "no")
+def extract_entity(elem, entity_type: str) -> tuple:
+    entity_id      = child_text(elem, "entity_id")
+    source_item_id = child_text(elem, "source_item_id")
+    entity_name    = child_text(elem, "entity_name")
+    system_id      = child_text(elem, "systemId")
+    entity_date    = child_text(elem, "entityDate")
 
-    # --- Names ---------------------------------------------------------------
-    primary_name = given_name = family_name = None
-    aliases: list[str] = []
+    # Aliases ----------------------------------------------------------------
+    alias_names: list[str] = []
+    alias_types: list[str] = []
+    aliases_block = find_child(elem, "aliases")
+    if aliases_block is not None:
+        for alias in iter_children(aliases_block, "alias"):
+            name  = child_text(alias, "name")
+            atype = child_text(alias, "type")
+            if name:
+                alias_names.append(name)
+                alias_types.append(atype or "")
 
-    names_block = find_child(elem, "Names")
-    if names_block is not None:
-        for name_el in iter_children(names_block, "Name"):
-            name_type = (name_el.get("nameType") or name_el.get("type") or "").lower()
-            full = child_text(name_el, "FullName") or child_text(name_el, "fullName")
-            given = child_text(name_el, "GivenName") or child_text(name_el, "givenName")
-            family = child_text(name_el, "FamilyName") or child_text(name_el, "familyName")
+    # Date of birth (persons only; take first entry) -------------------------
+    dob_year = dob_month = dob_day = dob_circa = None
+    dobs_block = find_child(elem, "date_of_births")
+    if dobs_block is not None:
+        first_dob = find_child(dobs_block, "date_of_birth")
+        if first_dob is not None:
+            dob_year  = safe_int(child_text(first_dob, "year"))
+            dob_month = safe_int(child_text(first_dob, "month"))
+            dob_day   = safe_int(child_text(first_dob, "day"))
+            circa_raw = child_text(first_dob, "circa")
+            dob_circa = circa_raw in ("true", "1") if circa_raw else None
 
-            if name_type in ("primary", "primaryname", ""):
-                if primary_name is None:
-                    primary_name = full or (f"{given} {family}".strip() if given or family else None)
-                    given_name  = given
-                    family_name = family
-            else:
-                alias = full or (f"{given} {family}".strip() if given or family else None)
-                if alias:
-                    aliases.append(alias)
-
-    # --- Gender & vital dates ------------------------------------------------
-    gender  = child_text(elem, "Gender") or child_text(elem, "gender")
-    dob_y, dob_m, dob_d = parse_date_block(elem, "DateOfBirth")
-    dod_y, dod_m, dod_d = parse_date_block(elem, "DateOfDeath")
-    deceased_raw = child_text(elem, "Deceased") or child_text(elem, "deceased")
-    deceased = deceased_raw in ("1", "true", "True", "yes") if deceased_raw else None
-
-    # --- Geo -----------------------------------------------------------------
+    # Attributes: gender / nationality / country -----------------------------
+    gender: str | None = None
     nationalities: list[str] = []
-    nat_block = find_child(elem, "Nationalities")
-    if nat_block is not None:
-        for n in iter_children(nat_block, "Nationality"):
-            val = (n.text or "").strip()
-            if val:
-                nationalities.append(val)
-
     countries: list[str] = []
-    cty_block = find_child(elem, "Countries")
-    if cty_block is not None:
-        for c in iter_children(cty_block, "Country"):
-            val = (c.text or "").strip()
-            if val:
-                countries.append(val)
+    attrs_block = find_child(elem, "attributes")
+    if attrs_block is not None:
+        for attr in iter_children(attrs_block, "attribute"):
+            atype = (child_text(attr, "type") or "").lower()
+            value = child_text(attr, "value")
+            if not value:
+                continue
+            if "gender" in atype or "sex" in atype:
+                gender = value
+            elif "national" in atype:
+                nationalities.append(value)
+            elif "country" in atype:
+                countries.append(value)
 
-    # --- Categories ----------------------------------------------------------
-    category_ids: list[str] = []
-    category_names: list[str] = []
-    cat_block = find_child(elem, "Categories")
-    if cat_block is not None:
-        for cat in iter_children(cat_block, "Category"):
-            cid = cat.get("categoryId") or cat.get("id") or cat.get("Id") or ""
-            cname = (cat.text or "").strip()
-            if cid:
-                category_ids.append(cid)
-            if cname:
-                category_names.append(cname)
+    # Events (list memberships) ----------------------------------------------
+    event_categories: list[str]     = []
+    event_sub_categories: list[str] = []
+    event_dates: list[str]          = []
+    event_end_dates: list[str]      = []
+    event_descriptions: list[str]   = []
+    events_block = find_child(elem, "events")
+    if events_block is not None:
+        for event in iter_children(events_block, "event"):
+            event_categories.append(child_text(event, "category") or "")
+            event_sub_categories.append(child_text(event, "sub_category") or "")
+            event_dates.append(child_text(event, "date") or "")
+            event_end_dates.append(child_text(event, "end_date") or "")
+            event_descriptions.append(child_text(event, "description") or "")
 
-    # --- Sources -------------------------------------------------------------
-    source_ids: list[str] = []
-    source_names: list[str] = []
-    src_block = find_child(elem, "Sources")
-    if src_block is not None:
-        for src in iter_children(src_block, "Source"):
-            sid = src.get("sourceId") or src.get("id") or src.get("Id") or ""
-            sname = (src.text or "").strip()
+    # Reference sources ------------------------------------------------------
+    source_item_ids: list[str] = []
+    refs_block = find_child(elem, "referenceSources")
+    if refs_block is not None:
+        for ref in iter_children(refs_block, "referenceSource"):
+            sid = child_text(ref, "source_item_id")
             if sid:
-                source_ids.append(sid)
-            if sname:
-                source_names.append(sname)
+                source_item_ids.append(sid)
 
-    # --- Identifiers ---------------------------------------------------------
-    identifier_types: list[str] = []
-    identifier_nums: list[str] = []
-    id_block = find_child(elem, "Identifiers")
-    if id_block is not None:
-        for idf in iter_children(id_block, "Identifier"):
-            itype = idf.get("type") or idf.get("Type") or ""
-            inum = idf.get("number") or idf.get("Number") or (idf.text or "").strip()
-            if itype or inum:
-                identifier_types.append(itype)
-                identifier_nums.append(inum)
+    # Identifications --------------------------------------------------------
+    id_types: list[str]     = []
+    id_values: list[str]    = []
+    id_countries: list[str] = []
+    ids_block = find_child(elem, "identifications")
+    if ids_block is not None:
+        for idf in iter_children(ids_block, "identification"):
+            id_types.append(child_text(idf, "type") or "")
+            id_values.append(child_text(idf, "value") or "")
+            id_countries.append(child_text(idf, "country") or "")
 
-    # --- Positions -----------------------------------------------------------
-    positions: list[str] = []
-    pos_block = find_child(elem, "Positions")
+    # Positions (persons only) -----------------------------------------------
+    position_names: list[str]      = []
+    position_from_dates: list[str] = []
+    position_to_dates: list[str]   = []
+    pos_block = find_child(elem, "positions")
     if pos_block is not None:
-        for pos in iter_children(pos_block, "Position"):
-            val = (pos.text or "").strip()
-            if val:
-                positions.append(val)
+        for pos in iter_children(pos_block, "position"):
+            pname = child_text(pos, "name")
+            if pname:
+                position_names.append(pname)
+                position_from_dates.append(child_text(pos, "fromDate") or "")
+                position_to_dates.append(child_text(pos, "toDate") or "")
 
-    # --- Misc ----------------------------------------------------------------
-    last_updated = child_text(elem, "LastUpdated") or child_text(elem, "lastUpdated")
+    # Addresses --------------------------------------------------------------
+    address_countries: list[str] = []
+    address_cities: list[str]    = []
+    addr_block = find_child(elem, "addresses")
+    if addr_block is not None:
+        for addr in iter_children(addr_block, "address"):
+            c = child_text(addr, "country")
+            ci = child_text(addr, "city")
+            if c:
+                address_countries.append(c)
+            if ci:
+                address_cities.append(ci)
 
     return (
         entity_id,
         entity_type,
-        is_active,
-        primary_name,
-        given_name,
-        family_name,
+        source_item_id,
+        entity_name,
+        system_id,
+        entity_date,
+        jdump(alias_names),
+        jdump(alias_types),
+        dob_year, dob_month, dob_day, dob_circa,
         gender,
-        dob_y, dob_m, dob_d,
-        dod_y, dod_m, dod_d,
-        deceased,
-        json.dumps(nationalities)    if nationalities    else None,
-        json.dumps(countries)        if countries        else None,
-        json.dumps(category_ids)     if category_ids     else None,
-        json.dumps(category_names)   if category_names   else None,
-        json.dumps(source_ids)       if source_ids       else None,
-        json.dumps(source_names)     if source_names     else None,
-        json.dumps(aliases)          if aliases          else None,
-        json.dumps(identifier_types) if identifier_types else None,
-        json.dumps(identifier_nums)  if identifier_nums  else None,
-        json.dumps(positions)        if positions        else None,
-        last_updated,
+        jdump(nationalities),
+        jdump(countries),
+        jdump(event_categories),
+        jdump(event_sub_categories),
+        jdump(event_dates),
+        jdump(event_end_dates),
+        jdump(event_descriptions),
+        jdump(source_item_ids),
+        jdump(id_types),
+        jdump(id_values),
+        jdump(id_countries),
+        jdump(position_names),
+        jdump(position_from_dates),
+        jdump(position_to_dates),
+        jdump(address_countries),
+        jdump(address_cities),
     )
 
+
+# ---------------------------------------------------------------------------
+# Streaming parser
+# ---------------------------------------------------------------------------
 
 def stream_entities(xml_path: Path):
-    """Yield parsed entity tuples by streaming the XML without full DOM load."""
-    context = etree.iterparse(
-        str(xml_path),
-        events=("end",),
-        tag=f"*",          # match any tag; we filter below to handle namespaces
-        recover=True,
-    )
+    """Yield (entity_tuple) for every <person> and <organization> in the feed."""
+    context = etree.iterparse(str(xml_path), events=("end",), recover=True)
     for _, elem in context:
-        if strip_ns(elem.tag) == ENTITY_TAG:
-            yield extract_entity(elem)
+        tag = strip_ns(elem.tag)
+        if tag in ENTITY_TAGS:
+            yield extract_entity(elem, tag)
             elem.clear()
             while elem.getprevious() is not None:
                 del elem.getparent()[0]
 
+
+# ---------------------------------------------------------------------------
+# Loader
+# ---------------------------------------------------------------------------
 
 def load(xml_path: Path, db_path: Path) -> int:
     print(f"Source : {xml_path}")
@@ -315,30 +344,19 @@ def load(xml_path: Path, db_path: Path) -> int:
     batch: list[tuple] = []
     total = 0
 
-    file_size = xml_path.stat().st_size
-    pbar = tqdm.tqdm(
-        total=file_size,
-        unit="B",
-        unit_scale=True,
-        desc="Parsing",
-        dynamic_ncols=True,
-    )
-
-    last_pos = 0
+    pbar = tqdm.tqdm(unit=" entities", desc="Loading", dynamic_ncols=True)
 
     for row in stream_entities(xml_path):
         batch.append(row)
         total += 1
+        pbar.update(1)
 
         if len(batch) >= BATCH_SIZE:
             con.executemany(INSERT_SQL, batch)
             batch.clear()
 
-            # Approximate byte progress via file position isn't directly
-            # available from iterparse; we update based on record count.
-            pbar.set_postfix(rows=total)
-            if total % LOG_EVERY == 0:
-                print(f"  {total:,} entities loaded…")
+        if total % LOG_EVERY == 0:
+            print(f"  {total:,} entities loaded…")
 
     if batch:
         con.executemany(INSERT_SQL, batch)
@@ -355,16 +373,17 @@ def main():
 
     total = load(XML_PATH, DB_PATH)
     print(f"\nDone — {total:,} entities written to {DB_PATH}")
-    print(f"\nQuick query check:")
+
     con = duckdb.connect(str(DB_PATH), read_only=True)
-    row = con.execute(f"SELECT COUNT(*) FROM {TABLE}").fetchone()
-    print(f"  SELECT COUNT(*) FROM {TABLE}  →  {row[0]:,}")
-    types = con.execute(
-        f"SELECT entity_type, COUNT(*) c FROM {TABLE} GROUP BY 1 ORDER BY 2 DESC LIMIT 10"
-    ).fetchall()
-    print(f"\n  Entity types (top 10):")
+    count = con.execute(f"SELECT COUNT(*) FROM {TABLE}").fetchone()[0]
+    print(f"\nSELECT COUNT(*) FROM {TABLE}  →  {count:,}")
+    types = con.execute(f"""
+        SELECT entity_type, COUNT(*) c FROM {TABLE}
+        GROUP BY 1 ORDER BY 2 DESC
+    """).fetchall()
+    print("\nEntity types:")
     for t, c in types:
-        print(f"    {t or '(null)':<25} {c:>8,}")
+        print(f"  {t or '(null)':<20} {c:>8,}")
     con.close()
 
 
