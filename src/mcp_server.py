@@ -35,7 +35,13 @@ with open(ROOT / "config.yaml") as f:
     config = yaml.safe_load(f)
 
 _output_dir = os.environ.get("OUTPUT_DIR")
-DB_PATH = (Path(_output_dir) if _output_dir else ROOT / "data" / "output") / config["db_filename"]
+if _output_dir:
+    output_path = Path(_output_dir)
+    if not output_path.is_absolute():
+        output_path = ROOT / output_path
+else:
+    output_path = ROOT / "data" / "output"
+DB_PATH = output_path / config["db_filename"]
 TABLE   = config["tables"]["entities"]
 
 server = Server("rdc-compliance")
