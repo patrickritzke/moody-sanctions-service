@@ -332,16 +332,20 @@ async def _get_overview(con) -> list[types.TextContent]:
     """).fetchall()
 
     top_lists = con.execute(f"""
-        SELECT UNNEST(json_extract_string(event_sub_categories, '$[*]')) AS sub,
-               COUNT(*) n
-        FROM {TABLE} WHERE event_sub_categories IS NOT NULL
+        SELECT sub, COUNT(*) n
+        FROM (
+            SELECT UNNEST(json_extract_string(event_sub_categories, '$[*]')) AS sub
+            FROM {TABLE} WHERE event_sub_categories IS NOT NULL
+        )
         GROUP BY 1 ORDER BY 2 DESC LIMIT 15
     """).fetchall()
 
     top_countries = con.execute(f"""
-        SELECT UNNEST(json_extract_string(countries, '$[*]')) AS cty,
-               COUNT(*) n
-        FROM {TABLE} WHERE countries IS NOT NULL
+        SELECT cty, COUNT(*) n
+        FROM (
+            SELECT UNNEST(json_extract_string(countries, '$[*]')) AS cty
+            FROM {TABLE} WHERE countries IS NOT NULL
+        )
         GROUP BY 1 ORDER BY 2 DESC LIMIT 15
     """).fetchall()
 
