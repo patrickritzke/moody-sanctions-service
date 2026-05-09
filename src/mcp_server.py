@@ -256,6 +256,35 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {}
             }
         ),
+        types.Tool(
+            name="search_by_sources",
+            description=(
+                "Search entities by name and explode results by source ID — "
+                "one row per (entity, source) match. If an entity appears on "
+                "three of your target lists it comes back as three rows. "
+                "source_ids is required; use get_overview to find valid values."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Name to search for (partial match, case-insensitive)"
+                    },
+                    "source_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Source IDs to filter and explode on. Required."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max rows to return (default 50)",
+                        "default": 50
+                    }
+                },
+                "required": ["name", "source_ids"]
+            }
+        ),
     ]
 
 
@@ -265,6 +294,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     try:
         if name == "search_entities":
             return await _search_entities(con, arguments)
+        elif name == "search_by_sources":
+            return await _search_by_sources(con, arguments)
         elif name == "lookup_entity":
             return await _lookup_entity(con, arguments)
         elif name == "get_overview":
@@ -348,6 +379,49 @@ async def _lookup_entity(con, args: dict) -> list[types.TextContent]:
         )]
 
     return [types.TextContent(type="text", text=fmt_entity_full(row, cols))]
+
+
+async def _search_by_sources(con, args: dict) -> list[types.TextContent]:
+    query = args["name"].strip()
+    source_ids: list[str] = args["source_ids"]
+    limit = int(args.get("limit", 50))
+    pattern = f"%{query}%"
+
+    if not source_ids:
+        return [types.TextContent(type="text",
+                text="source_ids is required for this tool.")]
+
+    placeholders = ", ".join("?" * len(source_ids))
+
+    rows = con.execute(f"""
+        SELECT e.entity_id, e.entity_type, e.entity_name, e.dob_year,
+               e.event_categories, e.event_sub_categories, sid AS matched_source_id
+        FROM {TABLE} e,
+             (SELECT UNNEST(json_extract_string(source_item_ids, '$[*]')) AS sid)
+        WHERE (e.entity_name ILIKE ? OR e.alias_names ILIKE ?)
+          AND sid IN ({placeholders})
+        ORDER BY e.entity_name, sid
+        LIMIT ?
+    """, [pattern, pattern] + source_ids + [limit]).fetchall()
+
+    if not rows:
+        return [types.TextContent(type="text",
+                text=f'No matches for "{query}" on sources: {", ".join(source_ids)}')]
+
+    lines = [
+        f'Found {len(rows)} hit{"s" if len(rows) != 1 else ""} for "{query}" '
+        f'across sources [{", ".join(source_ids)}]'
+        + (" (limit reached)" if len(rows) == limit else "") + ":\n"
+    ]
+
+    for eid, etype, name, dob_y, cats, subcats, src in rows:
+        dob_str  = f", b.{dob_y}" if dob_y else ""
+        list_str = fmt_json("event_sub_categories", subcats) or fmt_json("event_categories", cats)
+        lines.append(f"  [{src}]  {name} [{eid}] — {etype}{dob_str}")
+        if list_str:
+            lines.append(f"           Lists: {list_str}")
+
+    return [types.TextContent(type="text", text="\n".join(lines))]
 
 
 async def _get_overview(con) -> list[types.TextContent]:
