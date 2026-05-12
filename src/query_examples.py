@@ -59,21 +59,19 @@ def run_overview(con):
 
     print("\n=== Top 15 Event Categories ===")
     for cat, n in con.execute("""
-        SELECT UNNEST(json_extract_string(event_categories, '$[*]')) AS cat,
-               COUNT(*) AS n
-        FROM entities
-        WHERE event_categories IS NOT NULL
-        GROUP BY 1 ORDER BY 2 DESC LIMIT 15
+        SELECT cat, COUNT(*) AS n FROM (
+            SELECT UNNEST(json_extract_string(event_categories, '$[*]')) AS cat
+            FROM entities WHERE event_categories IS NOT NULL
+        ) GROUP BY 1 ORDER BY 2 DESC LIMIT 15
     """).fetchall():
         print(f"  {cat:<40} {n:>8,}")
 
     print("\n=== Top 15 Event Sub-categories ===")
     for sub, n in con.execute("""
-        SELECT UNNEST(json_extract_string(event_sub_categories, '$[*]')) AS sub,
-               COUNT(*) AS n
-        FROM entities
-        WHERE event_sub_categories IS NOT NULL
-        GROUP BY 1 ORDER BY 2 DESC LIMIT 15
+        SELECT sub, COUNT(*) AS n FROM (
+            SELECT UNNEST(json_extract_string(event_sub_categories, '$[*]')) AS sub
+            FROM entities WHERE event_sub_categories IS NOT NULL
+        ) GROUP BY 1 ORDER BY 2 DESC LIMIT 15
     """).fetchall():
         print(f"  {sub:<50} {n:>8,}")
 
