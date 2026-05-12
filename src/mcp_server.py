@@ -34,8 +34,11 @@ load_dotenv(ROOT / ".env")
 with open(ROOT / "config.yaml") as f:
     config = yaml.safe_load(f)
 
-# Always resolve DB path relative to the project root — never relative to CWD.
-DB_PATH = ROOT / "data" / "output" / config["db_filename"]
+# RDC_DB_PATH env var overrides the default location — set this in Claude
+# Desktop config to point at a shared/OneDrive copy of the database.
+_db_path_override = os.environ.get("RDC_DB_PATH")
+DB_PATH = Path(_db_path_override) if _db_path_override else \
+          ROOT / "data" / "output" / config["db_filename"]
 TABLE   = config["tables"]["entities"]
 
 server = Server("rdc-compliance")
