@@ -41,6 +41,83 @@ DB_PATH = Path(_db_path_override) if _db_path_override else \
           ROOT / "data" / "output" / config["db_filename"]
 TABLE   = config["tables"]["entities"]
 
+# ---------------------------------------------------------------------------
+# Code → label lookups from rdc_dictionary.xml
+# ---------------------------------------------------------------------------
+
+EVENT_CATEGORY: dict[str, str] = {
+    "ABU": "Abuse (Domestic, Elder, Child)",
+    "ARS": "Arson", "AST": "Assault, Battery",
+    "BIL": "Questionable Billing Practices", "BKY": "Bankruptcy",
+    "BLK": "Firm Specific Black List", "BRB": "Bribery / Corruption",
+    "BUR": "Burglary", "BUS": "Business Crimes (Antitrust, Price Fixing)",
+    "CFT": "Counterfeiting, Forgery", "CND": "Financial Condition Risk",
+    "CON": "Conspiracy", "CPR": "Copyright Infringement",
+    "CYB": "Cyber Crime", "DEF": "Default Risk", "DEN": "Denied Entity",
+    "DPP": "Data Privacy and Protection", "DPS": "Possession of Drugs",
+    "DTF": "Drug Trafficking", "DUI": "DUI / DWI",
+    "ENV": "Environmental Crimes", "FAR": "Foreign Agent Registration Act",
+    "FOF": "Former OFAC", "FOR": "Forfeiture",
+    "FOS": "Former Sanctions List", "FRD": "Fraud, Scams, Swindles",
+    "FUG": "Fugitive", "GAM": "Illegal Gambling",
+    "HCD": "Health Care Disciplines", "HTE": "Hate Groups / Hate Crimes",
+    "HUM": "Human Rights, Genocide, War Crimes",
+    "IFO": "Information Only", "IGN": "Illegal Weapons / Explosives",
+    "IMP": "Identity Theft, Impersonation", "IPR": "Illegal Prostitution",
+    "IRC": "Iran Connect", "KID": "Kidnapping",
+    "LMD": "Legal Marijuana Dispensary", "LNS": "Loan Sharking",
+    "MIS": "Misconduct", "MLA": "Money Laundering",
+    "MOR": "Mortgage Related", "MSB": "Money Services Business",
+    "MUR": "Murder / Manslaughter", "NSC": "Non-Specific Crime",
+    "OBS": "Obscenity / Child Pornography",
+    "ORG": "Organized Crime / Racketeering",
+    "PEP": "Politically Exposed Person", "PER": "Performance Risk",
+    "PLT": "Public Intoxication / Trespassing",
+    "PRJ": "Perjury / Obstruction of Justice",
+    "PSP": "Possession of Stolen Property", "REG": "Regulatory Action",
+    "REO": "Restructuring / Divestiture Risk", "RES": "Real Estate Actions",
+    "ROB": "Robbery", "SEC": "SEC Violations / Securities Fraud",
+    "SEX": "Sex Offenses", "SMG": "Smuggling",
+    "SNX": "Sanctions Connect", "SPY": "Espionage / Treason",
+    "TAX": "Tax Offenses", "TER": "Terrorist Related",
+    "TFT": "Theft / Embezzlement / Extortion",
+    "TRF": "People / Organ Trafficking",
+    "VCY": "Virtual Currency", "WLT": "Watch List",
+}
+
+EVENT_SUB_CATEGORY: dict[str, str] = {
+    "ACC": "Accused", "ACQ": "Acquitted / Not Guilty",
+    "ACT": "Disciplinary / Regulatory Action", "ADT": "Audit",
+    "ALL": "Alleged", "APL": "Appeal", "ARB": "Arbitration",
+    "ARN": "Arraigned", "ART": "Arrested", "ASC": "Associated With",
+    "CEN": "Censured", "CHG": "Charged", "CMP": "Complaint Filed",
+    "CNF": "Confession", "CSP": "Conspired", "CVT": "Convicted",
+    "DEP": "Deported", "DMS": "Dismissed", "EXP": "Expelled",
+    "FIL": "Fined (<$10k)", "FIM": "Fined (>$10k)",
+    "GOV": "Government Official", "IND": "Indicted",
+    "LIC": "Licensing Action", "LIN": "Lien", "PLE": "Plea",
+    "PRB": "Under Probe", "RVK": "Revoked Registration",
+    "SAN": "Sanctioned", "SET": "Settlement / Suit", "SEZ": "Seizure",
+    "SJT": "Served Jail Time", "SPD": "Suspended", "SPT": "Suspected",
+    "TRL": "Trial", "WTD": "Wanted",
+}
+
+
+def decode(codes_json: str | None, lookup: dict[str, str]) -> str:
+    """Decode a JSON array of codes to deduplicated human-readable labels."""
+    if not codes_json:
+        return ""
+    try:
+        seen, out = set(), []
+        for c in json.loads(codes_json):
+            if c and c not in seen:
+                out.append(lookup.get(c, c))
+                seen.add(c)
+        return ", ".join(out)
+    except Exception:
+        return str(codes_json)
+
+
 server = Server("rdc-compliance")
 
 
@@ -69,11 +146,11 @@ def fmt_entity_summary(row: tuple, cols: list[str]) -> str:
     dob_str = f", b.{dob_y}" if dob_y else ""
     lines.append(f"{name} [{eid}] — {etype}{dob_str}")
 
-    cats    = fmt_json(d.get("event_categories"))
-    subcats = fmt_json(d.get("event_sub_categories"))
+    cats    = decode(d.get("event_categories"), EVENT_CATEGORY)
+    subcats = decode(d.get("event_sub_categories"), EVENT_SUB_CATEGORY)
     if subcats:
-        lines.append(f"  Lists     : {subcats}")
-    elif cats:
+        lines.append(f"  Status    : {subcats}")
+    if cats:
         lines.append(f"  Categories: {cats}")
 
     ctys = fmt_json(d.get("countries"))
@@ -138,14 +215,16 @@ def fmt_entity_full(row: tuple, cols: list[str]) -> str:
             desc_list = json.loads(descs)   if descs   else [""] * len(cat_list)
             lines.append(f"\nCompliance events ({len(cat_list)}):")
             for cat, sub, dt, end, desc in zip(cat_list, sub_list, date_list, end_list, desc_list):
-                entry = f"  • {cat}" + (f" > {sub}" if sub else "")
+                cat_label = EVENT_CATEGORY.get(cat, cat)
+                sub_label = EVENT_SUB_CATEGORY.get(sub, sub) if sub else ""
+                entry = f"  • {cat_label}" + (f" — {sub_label}" if sub_label else "")
                 if dt:
                     entry += f"  [{dt}" + (f" – {end}" if end else "") + "]"
                 lines.append(entry)
                 if desc:
                     lines.append(f"    {desc[:200]}")
         except Exception:
-            lines.append(f"Events: {fmt_json(cats)}")
+            lines.append(f"Events: {decode(cats, EVENT_CATEGORY)}")
 
     aliases = fmt_json(d.get("alias_names"))
     if aliases:
@@ -419,7 +498,7 @@ async def _search_by_sources(con, args: dict) -> list[types.TextContent]:
 
     for eid, etype, name, dob_y, cats, subcats, src in rows:
         dob_str  = f", b.{dob_y}" if dob_y else ""
-        list_str = fmt_json("event_sub_categories", subcats) or fmt_json("event_categories", cats)
+        list_str = decode(subcats, EVENT_SUB_CATEGORY) or decode(cats, EVENT_CATEGORY)
         lines.append(f"  [{src}]  {name} [{eid}] — {etype}{dob_str}")
         if list_str:
             lines.append(f"           Lists: {list_str}")
