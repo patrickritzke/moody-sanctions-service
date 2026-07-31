@@ -81,6 +81,10 @@ data/output/             ← gitignored; rdc.duckdb lands here after loading
 - [x] Project scaffolding (gitignore, .env, requirements, config)
 - [x] `load_entities.py` — written and schema-verified against real XSD
 - [x] `load_relationships.py` — written (schema assumptions, not yet verified)
+- [x] `mcp_server.py` — MCP server for Claude Desktop, reads DuckDB via `RDC_DB_PATH`
+- [x] `fetch_sftp.py` — written; pulls the live feed from Moody's SFTP server into
+      `RDC_DATA_DIR` using `SFTP_HOST`/`SFTP_USERNAME`/`SFTP_PASSWORD`/`SFTP_REMOTE_DIR`
+      in `.env` (credentials now available — not yet run against the real server)
 - [ ] Full load not yet run — needs to be executed on the Windows machine
 - [ ] `rdc_relationships.xsd` and `rdc_sources.xsd` not yet inspected
 - [ ] `rdc_dictionary.xml` not yet read — worth doing to understand category codes

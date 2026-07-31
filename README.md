@@ -19,9 +19,14 @@ pip install -r requirements.txt
 
 # 3. Configure paths
 copy .env.example .env
-# Edit .env: set RDC_DATA_DIR to the folder containing the XML/XSD files
+# Edit .env: set RDC_DATA_DIR to the folder the feed files should live in
 
-# 4. Verify everything is in place
+# 4. (optional) Fetch the live feed via SFTP instead of a manual copy
+# Edit .env: set SFTP_HOST, SFTP_USERNAME, SFTP_PASSWORD, SFTP_REMOTE_DIR
+python src/fetch_sftp.py --dry-run       # list remote files/sizes first
+python src/fetch_sftp.py                 # download into RDC_DATA_DIR
+
+# 5. Verify everything is in place
 python src/check_setup.py
 ```
 
@@ -76,8 +81,10 @@ If your feed uses different element names, run `python src/inspect_xml.py` to se
 ├── requirements.txt
 └── src/
     ├── check_setup.py        # verify environment before loading
+    ├── fetch_sftp.py         # pull the live feed from Moody's SFTP server
     ├── inspect_xml.py        # schema discovery tool
     ├── load_entities.py      # streaming XML → DuckDB loader (entities)
     ├── load_relationships.py # streaming XML → DuckDB loader (relationships)
-    └── query_examples.py     # example queries and name search
+    ├── query_examples.py     # example queries and name search
+    └── mcp_server.py         # MCP server for Claude Desktop integration
 ```
